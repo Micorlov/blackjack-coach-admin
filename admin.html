@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blackjack Coach Admin</title>
+<style>
+:root{--bg:#0a0f1a;--panel:#111827;--line:#1e293b;--text:#e2e8f0;--dim:#94a3b8;--accent:#fbbf24;--good:#4ade80;--bad:#f87171}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Inter,system-ui,-apple-system,Segoe UI,sans-serif}
+.hidden{display:none!important}
+.gate{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:24px;text-align:center}
+.gate h1{margin:0;font-size:22px}
+button{font:inherit;cursor:pointer;border:1px solid var(--line);background:var(--panel);color:var(--text);padding:8px 14px;border-radius:8px}
+button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);color:#111;border-color:var(--accent);font-weight:600}
+.topbar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--bg);border-bottom:1px solid var(--line)}
+.topbar h1{margin:0;font-size:16px;flex:1}
+.tabs{display:flex;gap:6px;padding:12px 16px;overflow-x:auto}
+.tab{white-space:nowrap;border-radius:999px}
+.tab.on{background:var(--accent);color:#111;border-color:var(--accent);font-weight:600}
+main{padding:0 16px 40px;max-width:1200px;margin:0 auto}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:16px}
+.card,.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}
+.card .v{font-size:26px;font-weight:700;margin-top:4px}
+.card .l{color:var(--dim);font-size:12px}
+.panel{margin-bottom:16px}
+.panel h2{margin:0 0 10px;font-size:14px}
+.row{display:flex;align-items:center;gap:8px;margin:4px 0}
+.row .name{width:120px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row .bar{flex:1;background:var(--line);border-radius:4px;height:14px}
+.row .bar i{display:block;height:100%;background:var(--accent);border-radius:4px}
+.row .n{width:48px;text-align:right}
+.table-scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%}
+th,td{padding:6px 10px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+th{color:var(--dim);cursor:pointer;user-select:none}
+.badge{padding:2px 8px;border-radius:999px;font-size:12px}
+.badge.on{background:#14532d;color:var(--good)}.badge.off{background:#450a0a;color:var(--bad)}
+input{font:inherit;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+.muted{color:var(--dim)}
+.err{color:var(--bad)}
+@media(max-width:700px){main{padding:0 10px 40px}}
+</style>
+</head>
+<body>
+
+<div id="gate" class="gate">
+  <h1>Blackjack Coach Admin</h1>
+  <p class="muted" id="gateMsg">Sign in with the admin Google account.</p>
+  <button class="primary" id="signIn">Sign in with Google</button>
+</div>
+
+<div id="app" class="hidden">
+  <div class="topbar">
+    <h1>Blackjack Coach Admin</h1>
+    <span class="muted" id="who"></span>
+    <button id="refresh">Refresh</button>
+    <button id="signOut">Sign out</button>
+  </div>
+  <div class="tabs" id="tabs"></div>
+  <main id="view"></main>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  var ADMIN_EMAIL = 'micorlov@gmail.com';
+  var DAY = 86400000;
+  var ACTIVE_WINDOW_DAYS = 7;
+  var INSTALL_LIMIT = 5000;
+  var SESSION_LIMIT = 5000;
+  var ERROR_LIMIT = 1000;
+  var TABS = ['Overview', 'Installs', 'Learning', 'Analytics', 'Health'];
+
+  firebase.initializeApp({
+    apiKey: 'AIzaSyBFTH6CIUilIt1blfVop9vGynbIugXOE6E',
+    authDomain: 'blackjack-coach-stats.firebaseapp.com',
+    projectId: 'blackjack-coach-stats',
+    appId: '1:985216814332:web:c47d53a7b3ffb54c9f9b79'
+  });
+  var auth = firebase.auth();
+  var db = firebase.firestore();
+
+  var state = { tab: 'Overview', installs: [], sessions: [], errors: [], sort: { key: 'lastOpenAt', dir: -1 }, q: '' };
+  var $ = function (id) { return document.getElementById(id); };
+
+  function esc(v) {
+    return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function ms(ts) { return ts && ts.toMillis ? ts.toMillis() : 0; }
+  function fmt(t) { return t ? new Date(t).toISOString().slice(0, 16).replace('T', ' ') : '-'; }
+  function pct(a, b) { return b ? Math.round((a / b) * 100) + '%' : '-'; }
+  function avg(list) { return list.length ? Math.round(list.reduce(function (s, x) { return s + x; }, 0) / list.length) : 0; }
+
+  function count(list, keyFn) {
+    var m = {};
+    list.forEach(function (x) { var k = keyFn(x) || '?'; m[k] = (m[k] || 0) + 1; });
+    return Object.keys(m).map(function (k) { return [k, m[k]]; }).sort(function (a, b) { return b[1] - a[1]; });
+  }
+
+  function bars(pairs, max) {
+    var top = max || Math.max.apply(null, pairs.map(function (p) { return p[1]; }).concat([1]));
+    if (!pairs.length) return '<p class="muted">No data yet.</p>';
+    return pairs.map(function (p) {
+      return '<div class="row"><span class="name" title="' + esc(p[0]) + '">' + esc(p[0]) + '</span>' +
+        '<span class="bar"><i style="width:' + Math.round((p[1] / top) * 100) + '%"></i></span>' +
+        '<span class="n">' + esc(p[1]) + '</span></div>';
+    }).join('');
+  }
+  function card(label, value) { return '<div class="card"><div class="l">' + esc(label) + '</div><div class="v">' + esc(value) + '</div></div>'; }
+  function panel(title, body) { return '<div class="panel"><h2>' + esc(title) + '</h2>' + body + '</div>'; }
+
+  /* ---------- data ---------- */
+  function load() {
+    var now = Date.now();
+    var since30 = firebase.firestore.Timestamp.fromMillis(now - 30 * DAY);
+    var since7 = firebase.firestore.Timestamp.fromMillis(now - 7 * DAY);
+    $('view').innerHTML = '<p class="muted">Loading…</p>';
+    return Promise.all([
+      db.collection('installs').limit(INSTALL_LIMIT).get(),
+      db.collection('sessions').where('at', '>=', since30).orderBy('at', 'desc').limit(SESSION_LIMIT).get(),
+      db.collection('errors').where('at', '>=', since7).orderBy('at', 'desc').limit(ERROR_LIMIT).get()
+    ]).then(function (r) {
+      state.installs = r[0].docs.map(function (d) {
+        var x = d.data();
+        return { id: d.id, firstSeenAt: ms(x.firstSeenAt), lastOpenAt: ms(x.lastOpenAt), version: x.version || '', platform: x.platform || '', lang: x.lang || '', country: x.country || '' };
+      });
+      state.sessions = r[1].docs.map(function (d) { var x = d.data(); return { installId: x.installId, drill: x.drill, accuracy: x.accuracy, questions: x.questions, at: ms(x.at) }; });
+      state.errors = r[2].docs.map(function (d) { var x = d.data(); return { message: x.message, version: x.version, at: ms(x.at) }; });
+      render();
+    }).catch(function (e) {
+      $('view').innerHTML = '<p class="err">Failed to load: ' + esc(e.message) + '</p>';
+    });
+  }
+
+  /* ---------- views ---------- */
+  function isActive(i) { return i.lastOpenAt > Date.now() - ACTIVE_WINDOW_DAYS * DAY; }
+
+  function overview() {
+    var now = Date.now(), I = state.installs, S = state.sessions;
+    var today = new Date(); today.setHours(0, 0, 0, 0);
+    var activeToday = I.filter(function (i) { return i.lastOpenAt >= today.getTime(); }).length;
+    var wau = I.filter(function (i) { return i.lastOpenAt > now - 7 * DAY; }).length;
+    var mau = I.filter(function (i) { return i.lastOpenAt > now - 30 * DAY; }).length;
+    var new7 = I.filter(function (i) { return i.firstSeenAt > now - 7 * DAY; }).length;
+    var new30 = I.filter(function (i) { return i.firstSeenAt > now - 30 * DAY; }).length;
+    var churned = I.filter(function (i) { return !isActive(i); }).length;
+    var versions = count(I, function (i) { return i.version; });
+    return '<div class="grid">' +
+      card('Total installs', I.length) + card('Active today', activeToday) + card('WAU', wau) + card('MAU', mau) +
+      card('New (7d)', new7) + card('New (30d)', new30) + card('Churned (>7d)', churned) +
+      card('Sessions (30d)', S.length) + card('Avg accuracy (30d)', avg(S.map(function (s) { return s.accuracy; })) + '%') +
+      card('Sessions / install', I.length ? (S.length / I.length).toFixed(1) : '-') +
+      card('Latest version', versions.length ? versions[0][0] : '-') + '</div>' +
+      panel('Sessions per day (last 14 days)', bars(perDay(S, 14)));
+  }
+
+  function perDay(list, days) {
+    var out = [], now = Date.now();
+    for (var d = days - 1; d >= 0; d--) {
+      var day = new Date(now - d * DAY).toISOString().slice(0, 10);
+      out.push([day, list.filter(function (s) { return new Date(s.at).toISOString().slice(0, 10) === day; }).length]);
+    }
+    return out;
+  }
+
+  function installsView() {
+    var k = state.sort.key, dir = state.sort.dir, q = state.q.toLowerCase();
+    var rows = state.installs.filter(function (i) {
+      return !q || (i.id + i.country + i.lang + i.version + i.platform).toLowerCase().indexOf(q) >= 0;
+    }).sort(function (a, b) { return (a[k] > b[k] ? 1 : a[k] < b[k] ? -1 : 0) * dir; });
+    var cols = [['id', 'Install'], ['firstSeenAt', 'First seen'], ['lastOpenAt', 'Last open'], ['version', 'Version'], ['platform', 'Platform'], ['lang', 'Lang'], ['country', 'Country']];
+    return '<div class="panel"><div class="row"><input id="q" placeholder="Search id, country, lang, version…" value="' + esc(state.q) + '">' +
+      '<button id="csv">Export CSV</button><span class="muted">' + rows.length + ' installs</span></div>' +
+      '<div class="table-scroll"><table><thead><tr>' + cols.map(function (c) { return '<th data-k="' + c[0] + '">' + c[1] + (k === c[0] ? (dir > 0 ? ' ▲' : ' ▼') : '') + '</th>'; }).join('') + '<th>Status</th></tr></thead><tbody>' +
+      rows.map(function (i) {
+        return '<tr><td>' + esc(i.id) + '</td><td>' + fmt(i.firstSeenAt) + '</td><td>' + fmt(i.lastOpenAt) + '</td><td>' + esc(i.version) + '</td><td>' + esc(i.platform) + '</td><td>' + esc(i.lang) + '</td><td>' + esc(i.country) + '</td><td><span class="badge ' + (isActive(i) ? 'on">Active' : 'off">Churned') + '</span></td></tr>';
+      }).join('') + '</tbody></table></div></div>';
+  }
+
+  function learning() {
+    var S = state.sessions;
+    var byDrill = {};
+    S.forEach(function (s) { (byDrill[s.drill] = byDrill[s.drill] || []).push(s.accuracy); });
+    var acc = Object.keys(byDrill).map(function (d) { return [d + ' (' + byDrill[d].length + ')', avg(byDrill[d])]; });
+    return panel('Average accuracy by drill (30d)', bars(acc, 100)) +
+      panel('Sessions by drill (30d)', bars(count(S, function (s) { return s.drill; }))) +
+      panel('Avg questions per session', '<div class="card"><div class="v">' + avg(S.map(function (s) { return s.questions; })) + '</div></div>');
+  }
+
+  function analytics() {
+    var I = state.installs, now = Date.now();
+    var weeks = [];
+    for (var w = 7; w >= 0; w--) {
+      var from = now - (w + 1) * 7 * DAY, to = now - w * 7 * DAY;
+      weeks.push([new Date(to).toISOString().slice(5, 10), I.filter(function (i) { return i.firstSeenAt > from && i.firstSeenAt <= to; }).length]);
+    }
+    var d1 = I.filter(function (i) { return i.firstSeenAt && i.firstSeenAt < now - DAY; });
+    var d1ret = d1.filter(function (i) { return i.lastOpenAt - i.firstSeenAt >= DAY; });
+    var d7 = I.filter(function (i) { return i.firstSeenAt && i.firstSeenAt < now - 7 * DAY; });
+    var d7ret = d7.filter(function (i) { return i.lastOpenAt - i.firstSeenAt >= 7 * DAY; });
+    var hours = count(state.sessions, function (s) { return String(new Date(s.at).getHours()).padStart(2, '0'); }).sort(function (a, b) { return a[0] < b[0] ? -1 : 1; });
+    return '<div class="grid">' + card('Retention ~D1', pct(d1ret.length, d1.length)) + card('Retention ~D7', pct(d7ret.length, d7.length)) + '</div>' +
+      panel('New installs per week', bars(weeks)) +
+      panel('App versions', bars(count(I, function (i) { return i.version; }))) +
+      panel('Languages', bars(count(I, function (i) { return i.lang; }).slice(0, 20))) +
+      panel('Countries', bars(count(I, function (i) { return i.country; }).slice(0, 20))) +
+      panel('Platforms', bars(count(I, function (i) { return i.platform; }))) +
+      panel('Play hours (local, 30d)', bars(hours));
+  }
+
+  function health() {
+    var groups = {};
+    state.errors.forEach(function (e) {
+      var key = e.version + '|' + e.message;
+      var g = groups[key] = groups[key] || { message: e.message, version: e.version, n: 0, last: 0 };
+      g.n++; g.last = Math.max(g.last, e.at);
+    });
+    var list = Object.keys(groups).map(function (k) { return groups[k]; }).sort(function (a, b) { return b.n - a.n; });
+    return '<div class="grid">' + card('Errors (7d)', state.errors.length) + card('Distinct', list.length) + '</div>' +
+      panel('Errors by message and version', list.length ? '<div class="table-scroll"><table><thead><tr><th>Count</th><th>Version</th><th>Last</th><th>Message</th></tr></thead><tbody>' +
+        list.map(function (g) { return '<tr><td>' + g.n + '</td><td>' + esc(g.version) + '</td><td>' + fmt(g.last) + '</td><td style="white-space:normal">' + esc(g.message) + '</td></tr>'; }).join('') + '</tbody></table></div>' : '<p class="muted">No errors reported.</p>');
+  }
+
+  function csv() {
+    var head = ['install_id', 'first_seen', 'last_open', 'version', 'platform', 'lang', 'country'];
+    var lines = [head.join(',')].concat(state.installs.map(function (i) {
+      return [i.id, fmt(i.firstSeenAt), fmt(i.lastOpenAt), i.version, i.platform, i.lang, i.country].map(function (v) { return '"' + String(v).replace(/"/g, '""') + '"'; }).join(',');
+    }));
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/csv' }));
+    a.download = 'blackjack-coach-installs.csv';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  function render() {
+    $('tabs').innerHTML = TABS.map(function (t) { return '<button class="tab' + (t === state.tab ? ' on' : '') + '" data-t="' + t + '">' + t + '</button>'; }).join('');
+    var v = { Overview: overview, Installs: installsView, Learning: learning, Analytics: analytics, Health: health }[state.tab];
+    $('view').innerHTML = v();
+    var q = $('q');
+    if (q) { q.oninput = function () { state.q = q.value; var pos = q.selectionStart; render(); var n = $('q'); n.focus(); n.setSelectionRange(pos, pos); }; }
+    if ($('csv')) $('csv').onclick = csv;
+    Array.prototype.forEach.call(document.querySelectorAll('th[data-k]'), function (th) {
+      th.onclick = function () { var k = th.getAttribute('data-k'); state.sort = { key: k, dir: state.sort.key === k ? -state.sort.dir : -1 }; render(); };
+    });
+  }
+
+  $('tabs').onclick = function (e) { var t = e.target.getAttribute && e.target.getAttribute('data-t'); if (t) { state.tab = t; render(); } };
+  $('signIn').onclick = function () { auth.signInWithPopup(new firebase.auth.GoogleAuthProvider()).catch(function (e) { $('gateMsg').textContent = e.message; }); };
+  $('signOut').onclick = function () { auth.signOut(); };
+  $('refresh').onclick = load;
+
+  auth.onAuthStateChanged(function (user) {
+    if (!user) { $('gate').classList.remove('hidden'); $('app').classList.add('hidden'); return; }
+    if (user.email !== ADMIN_EMAIL || !user.emailVerified) {
+      $('gateMsg').textContent = 'Access denied: admin only.';
+      auth.signOut();
+      return;
+    }
+    $('gate').classList.add('hidden'); $('app').classList.remove('hidden');
+    $('who').textContent = user.email;
+    load();
+  });
+})();
+</script>
+</body>
+</html>
